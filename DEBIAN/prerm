@@ -1,0 +1,5 @@
+#!/bin/sh
+set -e
+systemctl stop mvmm.service || true
+systemctl disable mvmm.service || true
+exit 0

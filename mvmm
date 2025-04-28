@@ -1,0 +1,289 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+use Time::HiRes qw(usleep time);
+use Time::Local;
+use IO::Socket::INET;
+use POSIX qw(strftime WNOHANG);
+use AppConfig;
+use Sys::Syslog qw(:standard :macros);
+use POSIX qw(floor);
+use feature 'state';
+#use Data::Dump;
+
+my %children;
+my $maintenance_mode = 0;
+
+openlog('mvmm', 'pid', 'user');
+syslog('info', "mvmm supervisor started.");
+
+my $config_dir = '/etc/pve/mvmm';
+my $global_config_file = "$config_dir/mvmm.conf";
+my $config = AppConfig->new({ CASE => 1 });
+$config->define("disabled_log_interval", { DEFAULT => 25200,   ARGCOUNT => AppConfig::ARGCOUNT_ONE });
+$config->define("check_interval",        { DEFAULT =>    60,   ARGCOUNT => AppConfig::ARGCOUNT_ONE });
+$config->define("fail_interval",         { DEFAULT =>    15,   ARGCOUNT => AppConfig::ARGCOUNT_ONE });
+$config->define("fail_threshold",        { DEFAULT =>    30,   ARGCOUNT => AppConfig::ARGCOUNT_ONE });
+$config->define("wait_interval",         { DEFAULT =>    15,   ARGCOUNT => AppConfig::ARGCOUNT_ONE });
+$config->define("recovery_time",         { DEFAULT =>    60,   ARGCOUNT => AppConfig::ARGCOUNT_ONE });
+$config->define("log_interval",          { DEFAULT =>   900,   ARGCOUNT => AppConfig::ARGCOUNT_ONE });
+$config->define("portsall",              {                     ARGCOUNT => AppConfig::ARGCOUNT_ONE });
+$config->define("portsany",              {                     ARGCOUNT => AppConfig::ARGCOUNT_ONE });
+$config->define("enabled",               { DEFAULT => 'false', ARGCOUNT => AppConfig::ARGCOUNT_ONE });
+$config->define("name",                  {                     ARGCOUNT => AppConfig::ARGCOUNT_ONE });
+$config->define("ip",                    {                     ARGCOUNT => AppConfig::ARGCOUNT_ONE });
+$config->define("restart_at",            {                     ARGCOUNT => AppConfig::ARGCOUNT_ONE });
+$config->define("restart_after",         {                     ARGCOUNT => AppConfig::ARGCOUNT_ONE });
+
+$config->file($global_config_file) if -f $global_config_file;
+
+$SIG{TERM} = \&graceful_exit;
+$SIG{INT}  = \&graceful_exit;
+$SIG{USR1} = sub { foreach my $pid (keys %children) { kill 'USR1', $pid; } };
+$SIG{USR2} = sub {
+    $maintenance_mode = !$maintenance_mode;
+    syslog('info', "Supervisor maintenance mode toggled to $maintenance_mode");
+    foreach my $pid (keys %children) { kill 'USR2', $pid; }
+};
+
+sub logmsg {
+    my ($tag, $level, $msg) = @_;
+    openlog($tag, 'pid', 'user');
+    syslog($level, $msg);
+    closelog();
+}
+
+sub graceful_exit {
+    syslog('info', "Supervisor exiting. Killing children.");
+    kill 'TERM', $_ for keys %children;
+    closelog();
+    exit(0);
+}
+
+sub supervise_children {
+    while (1) {
+        foreach my $pid (keys %children) {
+            my $dead = waitpid($pid, WNOHANG);
+            if ($dead > 0) {
+                my $vmid = delete $children{$pid};
+                syslog('info', "Child for VMID $vmid exited.");
+            }
+        }
+        discover_new_vms();
+        sleep(10);
+    }
+}
+
+sub discover_new_vms {
+
+    state %vms_not_here;
+
+    opendir(my $dh, $config_dir) or die "Cannot open $config_dir: $!";
+    my @vm_confs = grep { /^\d+\.conf$/ } readdir($dh);
+    closedir($dh);
+
+    foreach my $file (@vm_confs) {
+        (my $vmid = $file) =~ s/\.conf$//;
+        next if grep { $_ eq $vmid } values %children;
+        my $status = `qm status $vmid 2>&1`; chop $status;
+        if ($status =~ /running/) {
+            syslog('info', "VM $vmid is running, starting monitor.");
+            # monitor_vm($vmid); # For testing without a child process
+            start_monitor_for_vmid($vmid);
+            delete $vms_not_here{$vmid};
+        } elsif ($status =~ /does not exist/) {
+            unless ( $vms_not_here{$vmid} ) {
+                syslog('info', "VM $vmid does not exist on this server.");
+                $vms_not_here{$vmid} = 1;
+            }
+        } else {
+            syslog('info', "VM $vmid: $status, not monitoring");
+            delete $vms_not_here{$vmid};
+        }
+    }
+}
+
+sub start_monitor_for_vmid {
+    my ($vmid) = @_;
+    my $pid = fork();
+    if (!defined $pid) {
+        die "Cannot fork: $!";
+    } elsif ($pid == 0) {
+        monitor_vm($vmid);
+        exit(0);
+    } else {
+        $children{$pid} = $vmid;
+    }
+}
+
+sub monitor_vm {
+    my ($vmid) = @_;
+    my $vm_conf_file = "$config_dir/$vmid.conf";
+    $config->file($vm_conf_file) if -f $vm_conf_file;
+
+    my $name = $config->get("name") // "vm-$vmid";
+    my $ip = $config->get("ip");
+    my @portsall = split(' ', $config->get("portsall") // '');
+    my @portsany = split(' ', $config->get("portsany") // '');
+    my $enabled = lc($config->get("enabled") // 'true') eq 'true';
+    my $check_interval = $config->get("check_interval");
+    my $fail_interval = $config->get("fail_interval");
+    my $fail_threshold = $config->get("fail_threshold");
+    my $wait_interval = $config->get("wait_interval");
+    my $log_interval = $config->get("log_interval");
+    my $recovery_time = $config->get("recovery_time");
+
+    my $restart_at = $config->get("restart_at");
+    my $restart_after = $config->get("restart_after");
+
+    my $last_log = time();
+    my $last_after_restart = 0;
+    my $recovering = time();
+
+    if (!$enabled) {
+        disabled_loop($vmid, $name, $config->get("disabled_log_interval"));
+        return;
+    }
+
+    my $last_scheduled_restart = 0;
+    my $firsterror;
+    my $restarted = time();
+
+    while (1) {
+        my $now = time();
+        my $vm_status = `qm status $vmid 2>&1`;
+
+        if ($vm_status =~ /does not exist|unable to find/ || $vm_status !~ /running/) {
+            syslog('info', "[$name] VMID $vmid is no longer available or not running. Exiting monitor.");
+            return;
+        }
+
+        if ($restart_at) {
+            my ($hr, $min) = $restart_at =~ /^(\d\d):(\d\d)$/;
+            if (defined $hr && defined $min) {
+                my @lt = localtime($now);
+                my $today_restart = timelocal(0, $min, $hr, @lt[3,4,5]);
+                if ($now >= $today_restart && $last_scheduled_restart < $today_restart) {
+                    syslog('info', "[$name] Scheduled restart at $restart_at triggered.");
+                    reboot_vm($vmid, $name, $wait_interval);
+                    $last_scheduled_restart = $restarted = $now;
+                }
+            }
+        }
+
+        if ($restart_after) {
+            my $interval = $restart_after * 3600;
+            if (($now - $restarted) >= $interval && $last_after_restart < $interval) {
+                syslog('info', "[$name] Restarting after $restart_after hours.");
+                reboot_vm($vmid, $name, $wait_interval);
+                $restarted = $now;
+            }
+        }
+
+        if (is_healthy($ip, \@portsall, \@portsany)) {
+            if ( $firsterror ) {
+                my $elapsed = floor($now-$firsterror+0.5);
+                syslog('info', "[$name] Recovered after ${elapsed}s.");
+            }
+            $firsterror = undef;
+        } else {
+            $firsterror //= $now;
+            my $since = floor($now - $firsterror + 0.5);
+            syslog('info', "[$name] Failed health check for ${since}s.");
+            if ($recovering && $now < $restarted + $recovery_time) {
+                my $more = floor($restarted + $recovery_time - $now + 0.5);
+                syslog('info', "[$name] VM recovering, allowing another ${more}s");
+            } elsif (($now - $firsterror) >= $fail_threshold) {
+                if (!$maintenance_mode) {
+                    syslog('warning', "[$name] VM unhealthy for $since seconds, rebooting VMID $vmid");
+                    reboot_vm($vmid, $name, $wait_interval);
+                    $restarted = $now;
+                    $firsterror = undef;
+                    $recovering = 1;
+                } else {
+                    syslog('info', "[$name] Maintenance mode active, no reboot will occur.");
+                }
+            }
+        }
+
+        if (!$firsterror && (($now - $last_log) >= $log_interval)) {
+            syslog('info', "[$name] Running since: ${restarted}");
+            $last_log = $now;
+        }
+
+        usleep($check_interval * 1_000_000);
+    }
+}
+
+sub disabled_loop {
+    my ($vmid, $name, $disabled_log_interval) = @_;
+    my $last_log = 0;
+    while (1) {
+        my $now = time();
+        if ($now - $last_log >= $disabled_log_interval) {
+            logmsg($name, 'info', "Section [$vmid] ($name) is disabled. No monitoring performed.");
+            $last_log = $now;
+        }
+
+        sleep(15);
+
+        my $vm_status = `qm status $vmid 2>&1`;
+
+        if ($vm_status =~ /does not exist|unable to find/ || $vm_status !~ /running/) {
+            syslog('info', "[$name] VMID $vmid is no longer available or not running. Exiting monitor.");
+            return;
+        }
+    }
+}
+
+sub is_healthy {
+    my ($ip, $portsall, $portsany) = @_;
+    foreach my $port (@$portsall) {
+        return 0 unless port_open($ip, $port);
+    }
+    if (@$portsany) {
+        foreach my $port (@$portsany) {
+            return 1 if port_open($ip, $port);
+        }
+        return 0;
+    }
+    return 1;
+}
+
+sub port_open {
+    my ($ip, $port) = @_;
+    my $sock = IO::Socket::INET->new(PeerAddr => $ip, PeerPort => $port, Timeout => 1);
+    return $sock ? 1 : 0;
+}
+
+sub reboot_vm {
+    my ($vmid, $name, $wait) = @_;
+    system("qm shutdown $vmid");
+
+    my $elapsed = 0;
+    while ($elapsed < $wait) {
+        my $status = `qm status $vmid`;
+        if ($status =~ /stopped/) {
+            last;
+        }
+        sleep(1);
+        $elapsed++;
+    }
+
+    my $final_status = `qm status $vmid`;
+    unless ($final_status =~ /stopped/) {
+        system("qm stop $vmid");
+        my $elapsed_stop = 0;
+        while ($elapsed_stop < $wait) {
+            my $check_status = `qm status $vmid`;
+            last if ($check_status =~ /stopped/);
+            sleep(1);
+            $elapsed_stop++;
+        }
+    }
+
+    system("qm start $vmid");
+}
+
+supervise_children();

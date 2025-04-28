@@ -1,0 +1,12 @@
+/mvmm_*/
+/*.deb
+*.swp
+*.swo
+*~
+/cover_db/
+/nytprof.out
+*.bak
+*.old
+/var/lib/mvmm/mvmm.db
+/*.log
+.build-version

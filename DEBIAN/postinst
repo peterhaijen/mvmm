@@ -1,0 +1,17 @@
+#!/bin/sh
+set -e
+
+# Create the target dir in pmxcfs if not present
+mkdir -p /etc/pve/mvmm
+
+# Copy default config only if not already present
+for f in /usr/share/mvmm/default-configs/*; do
+    target="/etc/pve/mvmm/$(basename "$f")"
+    [ -e "$target" ] || cp "$f" "$target"
+done
+
+set -e
+systemctl daemon-reload
+systemctl enable mvmm.service
+systemctl start mvmm.service
+exit 0
