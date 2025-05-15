@@ -10,6 +10,7 @@ Designed for **reliability**, **mvmm** uses isolated processes per VM and clean 
 ## ✨ Features
 
 - Monitor any number of VMs from a simple config file
+- Supports VM migration from one Proxmox node to another
 - Per-VM health check via TCP port responsiveness
 - Automatic reboot after configurable failure thresholds
 - Maintenance mode toggle (disable reboot during maintenance)
@@ -39,78 +40,64 @@ Tested on Debian 12 and Proxmox 8.
 
 ## 🛠 Installation
 
-1. Clone the repository:
+### Clone the repository
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/peterhaijen/mvmm.git
 cd mvmm
 ```
+### Use the official repository
 
-2. Build and install the Debian package:
-
-```bash
-make deb
-sudo dpkg -i mvmm_1.0_all.deb
-```
-
-This will:
-- Install the `mvmm` binary to `/usr/local/bin/mvmm`
-- Install default config `/etc/mvmm.conf`
-- Install systemd service `/etc/systemd/system/mvmm.service`
-- Create the database directory `/var/lib/mvmm/`
-- Automatically enable and start the `mvmm` systemd service.
+A recent version of mvmm will be available at [the official repository](https://repo.qb21.nl/).
 
 ---
 
 ## ⚙️ Configuration
 
-Edit `/etc/mvmm.conf` to define VMs to monitor.
+### Global settings
 
-Each VM has a `[section]` with parameters:
+The configuratio files are installed in '/etc/pve/mvmm'. This location is automatically synced by Proxmox to all nodes in the cluster. This makes it easy to maintain a uniform configuration accross all members of the cluster.
 
-Example:
-
-```ini
-[pi-vm]
-VMID=413
-IP=192.168.1.105
-PORTSALL=80
-PORTSANY=5000 5001 5002 5003
-CHECK_INTERVAL=2
-FAIL_INTERVAL=15
-FAIL_THRESHOLD=30
-WAIT_INTERVAL=15
-LOG_INTERVAL=900
-
-[backup-vm]
-VMID=420
-IP=192.168.1.110
-PORTSALL=443
-PORTSANY=8080
-CHECK_INTERVAL=5
-FAIL_INTERVAL=20
-FAIL_THRESHOLD=45
-WAIT_INTERVAL=15
-LOG_INTERVAL=900
-```
+There is a global configuration file `/etc/pve/mvmm/mvmm.conf`, with settings that apply to all VMs.
 
 | Field             | Meaning |
 |:------------------|:--------|
-| `VMID`             | Proxmox VM ID (integer, primary key in database) |
-| `IP`               | IP address of VM to monitor |
-| `PORTSALL`         | Space-separated list of ports; all must be responsive |
-| `PORTSANY`         | Space-separated list of ports; at least one must be responsive |
-| `CHECK_INTERVAL`   | Seconds between health checks when healthy |
-| `FAIL_INTERVAL`    | Seconds between checks when a failure is detected |
-| `FAIL_THRESHOLD`   | **Seconds** of continuous failure allowed before reboot |
-| `WAIT_INTERVAL`    | Seconds to wait during shutdown/startup steps |
-| `LOG_INTERVAL`     | Seconds between "still running" logs during healthy operation |
-| `RECOVERY_TIME`    | Seconds after a reboot necesary for the VM to be operational again |
+| `ip`               | IP address of VM to monitor |
+| `name`             | Name of the VM to monitor, used for logging |
+| `portsall`         | Space-separated list of ports; all must be responsive |
+| `portsany`         | Space-separated list of ports; at least one must be responsive |
+| `check_interval`   | Seconds between health checks when healthy |
+| `fail_interval`    | Seconds between checks when a failure is detected |
+| `fail_threshold`   | **Seconds** of continuous failure allowed before reboot |
+| `wait_interval`    | Seconds to wait during shutdown/startup steps |
+| `log_interval`     | Seconds between "still running" logs during healthy operation |
+| `recovery_time`    | Seconds after a reboot necesary for the VM to be operational again |
 
 ✅ All time values are **in seconds**.
 
 ✅ **Fail threshold** is a time duration, **not a number of failures**.
 
+```
+$ cat /etc/pve/mvmm/mvmm.conf 
+check_interval=2
+fail_interval=15
+fail_threshold=30
+wait_interval=15
+log_interval=900
+```
+
+### VM specific settings
+
+For each specific VM, a configuration file '/etc/pve/mvmm/<VMID>.conf' must be created.
+Settings in this configuration file will override global settings.
+Typically, this will contain the IP address and port numbers to monitor.
+
+```
+$ cat /etc/pve/mvmm/100.conf
+name=nginx
+ip=192.168.1.25
+portsall=80
+```
 ---
 
 ## 🏃 Managing the Service
@@ -169,28 +156,28 @@ kill -TERM $(pidof mvmm)
 
 ## 📦 Building the Debian Package
 
-To rebuild `mvmm` as a `.deb` file:
-
-```bash
-make deb
-```
-
 This uses the `Makefile` to:
 
-- Package binaries, config, systemd unit, and database scripts
+- Package binaries, config and systemd unit
 - Install appropriate `postinst`, `prerm`, `postrm` hooks
 
-Result:
+1. Build `mvmm` as a `.deb` file:
 
 ```bash
-mvmm_1.0_all.deb
+make
 ```
 
-Install it:
+2. Install the Debian package:
 
 ```bash
-sudo dpkg -i mvmm_1.0_all.deb
+sudo dpkg -i mvmm_*.deb
 ```
+
+This will:
+- Install the `mvmm` per script to `/usr/local/bin/mvmm`
+- Install a default config `/etc/pve/mvmm/mvmm.conf`
+- Install systemd service `/etc/systemd/system/mvmm.service`
+- Automatically enable and start the `mvmm` systemd service.
 
 ---
 
@@ -204,7 +191,7 @@ sudo systemctl disable mvmm
 sudo apt remove mvmm
 ```
 
-Post-removal scripts will reload systemd properly.
+Pre- and Post-removal scripts should handle this.
 
 ---
 
@@ -220,7 +207,7 @@ You are free to use, modify, and distribute.
 
 Developed through collaboration between:
 
-- **You** — setting extremely high technical quality standards
+- **Me** — making life difficult for ChatGPT, and coding away the halucinations
 - **ChatGPT** — assisting with architecture, reliability design, implementation, and packaging
 
 This project follows strict traditional Unix principles:  
