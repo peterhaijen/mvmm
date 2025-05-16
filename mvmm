@@ -208,7 +208,8 @@ sub monitor_vm {
         }
 
         if (!$firsterror && (($now - $last_log) >= $log_interval)) {
-            syslog('info', "[$name] Running since: ${restarted}");
+            my $datetime = localtime($restarted);
+            syslog('info', "[$name] Running since: ${datetime}");
             $last_log = $now;
         }
 
