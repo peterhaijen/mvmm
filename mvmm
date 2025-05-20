@@ -26,7 +26,7 @@ $config->define("check_interval",        { DEFAULT =>    60,   ARGCOUNT => AppCo
 $config->define("fail_interval",         { DEFAULT =>    15,   ARGCOUNT => AppConfig::ARGCOUNT_ONE });
 $config->define("fail_threshold",        { DEFAULT =>    30,   ARGCOUNT => AppConfig::ARGCOUNT_ONE });
 $config->define("wait_interval",         { DEFAULT =>    15,   ARGCOUNT => AppConfig::ARGCOUNT_ONE });
-$config->define("recovery_time",         { DEFAULT =>    60,   ARGCOUNT => AppConfig::ARGCOUNT_ONE });
+$config->define("boot_time",             { DEFAULT =>    60,   ARGCOUNT => AppConfig::ARGCOUNT_ONE });
 $config->define("log_interval",          { DEFAULT =>   900,   ARGCOUNT => AppConfig::ARGCOUNT_ONE });
 $config->define("portsall",              {                     ARGCOUNT => AppConfig::ARGCOUNT_ONE });
 $config->define("portsany",              {                     ARGCOUNT => AppConfig::ARGCOUNT_ONE });
@@ -132,14 +132,14 @@ sub monitor_vm {
     my $fail_threshold = $config->get("fail_threshold");
     my $wait_interval = $config->get("wait_interval");
     my $log_interval = $config->get("log_interval");
-    my $recovery_time = $config->get("recovery_time");
+    my $boot_time = $config->get("boot_time");
 
     my $restart_at = $config->get("restart_at");
     my $restart_after = $config->get("restart_after");
 
     my $last_log = time();
     my $last_after_restart = 0;
-    my $recovering = time();
+    my $booting = 1;
 
     if (!$enabled) {
         disabled_loop($vmid, $name, $config->get("disabled_log_interval"));
@@ -184,23 +184,23 @@ sub monitor_vm {
         if (is_healthy($ip, \@portsall, \@portsany)) {
             if ( $firsterror ) {
                 my $elapsed = floor($now-$firsterror+0.5);
-                syslog('info', "[$name] Recovered after ${elapsed}s.");
+                syslog('info', "[$name] Ready after ${elapsed}s.");
             }
-            $firsterror = undef;
+            $firsterror = $booting = undef;
         } else {
             $firsterror //= $now;
             my $since = floor($now - $firsterror + 0.5);
             syslog('info', "[$name] Failed health check for ${since}s.");
-            if ($recovering && $now < $restarted + $recovery_time) {
-                my $more = floor($restarted + $recovery_time - $now + 0.5);
-                syslog('info', "[$name] VM recovering, allowing another ${more}s");
+            if ($booting && $now < $restarted + $boot_time) {
+                my $more = floor($restarted + $boot_time - $now + 0.5);
+                syslog('info', "[$name] VM booting, allowing another ${more}s");
             } elsif (($now - $firsterror) >= $fail_threshold) {
                 if (!$maintenance_mode) {
                     syslog('warning', "[$name] VM unhealthy for $since seconds, rebooting VMID $vmid");
                     reboot_vm($vmid, $name, $wait_interval);
                     $restarted = $now;
                     $firsterror = undef;
-                    $recovering = 1;
+                    $booting = 1;
                 } else {
                     syslog('info', "[$name] Maintenance mode active, no reboot will occur.");
                 }
