@@ -1,4 +1,4 @@
-#!/usr/bin/env perl
+#!/usr/bin/perl
 
 use strict;
 use warnings;
@@ -10,17 +10,15 @@ use AppConfig;
 use Sys::Syslog qw(:standard :macros);
 use POSIX qw(floor);
 use feature 'state';
+use File::Pid;
 #use Data::Dump;
 
 my %children;
 my $maintenance_mode = 0;
 
-openlog('mvmm', 'pid', 'user');
-syslog('info', "mvmm supervisor started.");
-
 my $config_dir = '/etc/pve/mvmm';
 my $global_config_file = "$config_dir/mvmm.conf";
-my $config = AppConfig->new({ CASE => 1 });
+my $config = AppConfig->new({ CASE => 1, ERROR => sub { printf STDERR "Ignoring invalid argument: " . shift . "\n" } });
 $config->define("disabled_log_interval", { DEFAULT => 25200,   ARGCOUNT => AppConfig::ARGCOUNT_ONE });
 $config->define("check_interval",        { DEFAULT =>    60,   ARGCOUNT => AppConfig::ARGCOUNT_ONE });
 $config->define("fail_interval",         { DEFAULT =>    15,   ARGCOUNT => AppConfig::ARGCOUNT_ONE });
@@ -35,16 +33,72 @@ $config->define("name",                  {                     ARGCOUNT => AppCo
 $config->define("ip",                    {                     ARGCOUNT => AppConfig::ARGCOUNT_ONE });
 $config->define("restart_at",            {                     ARGCOUNT => AppConfig::ARGCOUNT_ONE });
 $config->define("restart_after",         {                     ARGCOUNT => AppConfig::ARGCOUNT_ONE });
+$config->define("nofork|n!",             { DEFAULT => 0 });
+$config->define("usr1|1!",               { DEFAULT => 0 });
+$config->define("usr2|2!",               { DEFAULT => 0 });
+$config->define("pidfile!",              { DEFAULT => '/tmp/mvmm.pid' });
 
 $config->file($global_config_file) if -f $global_config_file;
+$config->args() or die "Invalid arguments";
+
+my $pidfile = File::Pid->new({ file => $config->pidfile });
+
+if ( $config->usr1 || $config->usr2 ) {
+    # We want to send a signal to an existing process
+    if ( my $pid = $pidfile->running ) {
+        print "Sending signal to daemon process $pid\n";
+        my $n = kill $config->usr1 ? 'USR1' : 'USR2', $pid;
+        warn "Failed to send signal to $pid: $!" unless $n;
+        exit( $n > 0 );
+    } else {
+        print "No server process running, aborting.\n";
+        exit(10);
+    }
+    # Not reached
+}
+
+if ( $< || $> ) {
+    # Not running as root
+    print "Not running as root, aborting\n";
+    exit(0);
+}
+
+openlog('mvmm', 'pid', 'user');
+
+if ( my $pid = $pidfile->running ) {
+    # A process is already running
+    syslog('info', "mvmm supervisor already running with pid $pid, aborting");
+    exit(10);
+}
+
+# Create a PID file
+$pidfile->remove;
+my $pid = $pidfile->write;
+
+END {
+    if ( defined $pid && $pid == $$ ) {
+        # parent process should remove pid file
+        $pidfile->remove;
+    }
+}
+
+syslog('info', "mvmm supervisor started.");
 
 $SIG{TERM} = \&graceful_exit;
 $SIG{INT}  = \&graceful_exit;
-$SIG{USR1} = sub { foreach my $pid (keys %children) { kill 'USR1', $pid; } };
+$SIG{USR1} = sub { 
+    if ( $pid == $$ ) {
+        foreach my $pid (keys %children) { kill 'USR1', $pid; }
+    }
+};
+
 $SIG{USR2} = sub {
-    $maintenance_mode = !$maintenance_mode;
-    syslog('info', "Supervisor maintenance mode toggled to $maintenance_mode");
-    foreach my $pid (keys %children) { kill 'USR2', $pid; }
+    $maintenance_mode = 1 - $maintenance_mode;
+    if ( $pid == $$ ) {
+        # This is the parent process
+        syslog('info', "Supervisor maintenance mode toggled to $maintenance_mode");
+        foreach my $pid (keys %children) { kill 'USR2', $pid; }
+    }
 };
 
 sub logmsg {
@@ -55,10 +109,18 @@ sub logmsg {
 }
 
 sub graceful_exit {
-    syslog('info', "Supervisor exiting. Killing children.");
-    kill 'TERM', $_ for keys %children;
-    closelog();
-    exit(0);
+    if ( $pid == $$ ) {
+        # Parent
+        syslog('info', "Supervisor about to exit, killing children.");
+        kill 'TERM', $_ for keys %children;
+        sleep(1);
+        syslog('info', "Supervisor exiting.");
+        closelog();
+        exit(0);
+    } else {
+        # A child process
+        exit(0);
+    }
 }
 
 sub supervise_children {
@@ -89,8 +151,11 @@ sub discover_new_vms {
         my $status = `qm status $vmid 2>&1`; chop $status;
         if ($status =~ /running/) {
             syslog('info', "VM $vmid is running, starting monitor.");
-            # monitor_vm($vmid); # For testing without a child process
-            start_monitor_for_vmid($vmid);
+            if ( $config->nofork ) {
+                monitor_vm($vmid); # For testing without a child process
+            } else {
+                start_monitor_for_vmid($vmid);
+            }
             delete $vms_not_here{$vmid};
         } elsif ($status =~ /does not exist/) {
             unless ( $vms_not_here{$vmid} ) {
@@ -184,26 +249,36 @@ sub monitor_vm {
         if (is_healthy($ip, \@portsall, \@portsany)) {
             if ( $firsterror ) {
                 my $elapsed = floor($now-$firsterror+0.5);
-                syslog('info', "[$name] Ready after ${elapsed}s.");
+                syslog('info', "[$name] Online after ${elapsed}s.");
             }
             $firsterror = $booting = undef;
         } else {
             $firsterror //= $now;
-            my $since = floor($now - $firsterror + 0.5);
-            syslog('info', "[$name] Failed health check for ${since}s.");
-            if ($booting && $now < $restarted + $boot_time) {
-                my $more = floor($restarted + $boot_time - $now + 0.5);
-                syslog('info', "[$name] VM booting, allowing another ${more}s");
-            } elsif (($now - $firsterror) >= $fail_threshold) {
-                if (!$maintenance_mode) {
-                    syslog('warning', "[$name] VM unhealthy for $since seconds, rebooting VMID $vmid");
-                    reboot_vm($vmid, $name, $wait_interval);
-                    $restarted = $now;
-                    $firsterror = undef;
-                    $booting = 1;
-                } else {
-                    syslog('info', "[$name] Maintenance mode active, no reboot will occur.");
-                }
+            my $after_seconds;
+            my $msg;
+
+            if ( $maintenance_mode ) {
+                $after_seconds = 0;
+                $msg = "[$name] Maintenance mode active, no reboot will occur.";
+            } elsif ( $booting ) {
+                $after_seconds = $boot_time;
+                $msg = "[$name] Failed health check; reboot at " . localtime($firsterror + $after_seconds);
+            } else {
+                $after_seconds = $fail_threshold;
+                $msg = "[$name] Failed health check; reboot at " . localtime($firsterror + $after_seconds);
+            }
+
+            if ( ($now - $last_log) >= $log_interval || $firsterror == $now ) {
+                syslog('info', $msg);
+                $last_log = $now;
+            }
+
+            if ($after_seconds && ($now - $firsterror) >= $after_seconds) {
+                syslog('warning', "[$name] VM unhealthy for $after_seconds seconds, rebooting now!");
+                reboot_vm($vmid, $name, $wait_interval);
+                $restarted = $now;
+                $firsterror = undef;
+                $booting = 1;
             }
         }
 

@@ -31,7 +31,7 @@ You must have installed:
 - These Perl modules (available via apt):
 
 ```bash
-apt install perl libdbi-perl libdbd-sqlite3-perl libio-socket-inet-perl libsys-syslog-perl netcat-openbsd
+apt install perl libio-socket-inet-perl libsys-syslog-perl netcat-openbsd libfile-pid-perl
 ```
 
 Tested on Debian 12 and Proxmox 8.

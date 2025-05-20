@@ -42,7 +42,7 @@ deb:
 	echo "Priority: optional" >> $(BUILD_DIR)/DEBIAN/control
 	echo "Architecture: $(ARCH)" >> $(BUILD_DIR)/DEBIAN/control
 	echo "Maintainer: Peter Haijen <your@email.com>" >> $(BUILD_DIR)/DEBIAN/control
-	echo "Depends: perl, libappconfig-perl" >> $(BUILD_DIR)/DEBIAN/control
+	echo "Depends: perl, libappconfig-perl, libfile-pid-perl" >> $(BUILD_DIR)/DEBIAN/control
 	echo "Description: Multi-VM Monitoring Daemon for Proxmox" >> $(BUILD_DIR)/DEBIAN/control
 
 	dpkg-deb --build $(BUILD_DIR) $(DEB)
