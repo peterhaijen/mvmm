@@ -15,6 +15,7 @@ use File::Pid;
 
 my %children;
 my $maintenance_mode = 0;
+my %name;
 
 my $config_dir = '/etc/pve/mvmm';
 my $global_config_file = "$config_dir/mvmm.conf";
@@ -140,30 +141,40 @@ sub supervise_children {
 sub discover_new_vms {
 
     state %vms_not_here;
+    my %status;
 
     opendir(my $dh, $config_dir) or die "Cannot open $config_dir: $!";
     my @vm_confs = grep { /^\d+\.conf$/ } readdir($dh);
     closedir($dh);
 
+    open QMLIST, "qm list|" or die "Cannot list qemy VMs: $!";
+    while (<QMLIST>) {
+        if ( /^\s+(\d+)\s+([^ ]+)\s+([^ ]+)/ ) {
+            my $vmid = $1;
+            $name{$vmid} = $2;
+            $status{$vmid} = $3;
+        }
+    }
+    close QMLIST;
+
     foreach my $file (@vm_confs) {
         (my $vmid = $file) =~ s/\.conf$//;
         next if grep { $_ eq $vmid } values %children;
-        my $status = `qm status $vmid 2>&1`; chop $status;
-        if ($status =~ /running/) {
-            syslog('info', "VM $vmid is running, starting monitor.");
+        if (! defined $status{$vmid}) {
+            unless ( $vms_not_here{$vmid} ) {
+                syslog('info', "VM $vmid does not exist on this server.");
+                $vms_not_here{$vmid} = 1;
+            }
+        } elsif ($status{$vmid} =~ /running/) {
+            syslog('info', "[$name{$vmid}] VM $vmid is running, starting monitor.");
             if ( $config->nofork ) {
                 monitor_vm($vmid); # For testing without a child process
             } else {
                 start_monitor_for_vmid($vmid);
             }
             delete $vms_not_here{$vmid};
-        } elsif ($status =~ /does not exist/) {
-            unless ( $vms_not_here{$vmid} ) {
-                syslog('info', "VM $vmid does not exist on this server.");
-                $vms_not_here{$vmid} = 1;
-            }
         } else {
-            syslog('info', "VM $vmid: $status, not monitoring");
+            syslog('info', "[$name{$vmid}] VM $vmid: $status{$vmid}, not monitoring");
             delete $vms_not_here{$vmid};
         }
     }
@@ -187,7 +198,7 @@ sub monitor_vm {
     my $vm_conf_file = "$config_dir/$vmid.conf";
     $config->file($vm_conf_file) if -f $vm_conf_file;
 
-    my $name = $config->get("name") // "vm-$vmid";
+    my $name = $name{$vmid};
     my $ip = $config->get("ip");
     my @portsall = split(' ', $config->get("portsall") // '');
     my @portsany = split(' ', $config->get("portsany") // '');
@@ -259,7 +270,7 @@ sub monitor_vm {
 
             if ( $maintenance_mode ) {
                 $after_seconds = 0;
-                $msg = "[$name] Maintenance mode active, no reboot will occur.";
+                $msg = "[$name] Failed health check; maintenance mode active, no reboot will occur.";
             } elsif ( $booting ) {
                 $after_seconds = $boot_time;
                 $msg = "[$name] Failed health check; reboot at " . localtime($firsterror + $after_seconds);
@@ -269,12 +280,12 @@ sub monitor_vm {
             }
 
             if ( ($now - $last_log) >= $log_interval || $firsterror == $now ) {
-                syslog('info', $msg);
+                syslog('warning', $msg);
                 $last_log = $now;
             }
 
             if ($after_seconds && ($now - $firsterror) >= $after_seconds) {
-                syslog('warning', "[$name] VM unhealthy for $after_seconds seconds, rebooting now!");
+                syslog('err', "[$name] VM unhealthy for $after_seconds seconds, rebooting now!");
                 reboot_vm($vmid, $name, $wait_interval);
                 $restarted = $now;
                 $firsterror = undef;
