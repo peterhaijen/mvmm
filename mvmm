@@ -61,7 +61,7 @@ if ( $config->usr1 || $config->usr2 ) {
 if ( $< || $> ) {
     # Not running as root
     print "Not running as root, aborting\n";
-    exit(0);
+    exit(10);
 }
 
 openlog('mvmm', 'pid', 'user');
@@ -88,15 +88,24 @@ syslog('info', "mvmm supervisor started.");
 $SIG{TERM} = \&graceful_exit;
 $SIG{INT}  = \&graceful_exit;
 
-my $last_log;
+my $last_log = 0;
 
 $SIG{USR1} = sub { 
     if ( $pid == $$ ) {
         # Parent
+
+        # Show maintenance mode
         syslog('info', "Supervisor - maintenance mode: $maintenance_mode");
+
+        # Show number of monitored VMs
         my $count = scalar keys %children;
         syslog('info', "Supervisor - monitoring ${count} VMs");
+
+        # Forward signal to all children for added info
         foreach my $pid (keys %children) { kill 'USR1', $pid; }
+
+        # And reset last_log time to show more info
+        $last_log = 0;
     } else {
         # A monitoring child
         $last_log = 0;
@@ -140,7 +149,6 @@ sub supervise_children {
             my $dead = waitpid($pid, WNOHANG);
             if ($dead > 0) {
                 my $vmid = delete $children{$pid};
-                syslog('info', "Child for VMID $vmid exited.");
             }
         }
         discover_new_vms();
@@ -157,7 +165,7 @@ sub discover_new_vms {
     my @vm_confs = grep { /^\d+\.conf$/ } readdir($dh);
     closedir($dh);
 
-    open QMLIST, "qm list|" or die "Cannot list qemy VMs: $!";
+    open QMLIST, "qm list|" or die "Cannot list qemu VMs: $!";
     while (<QMLIST>) {
         if ( /^\s+(\d+)\s+([^ ]+)\s+([^ ]+)/ ) {
             my $vmid = $1;
@@ -166,6 +174,11 @@ sub discover_new_vms {
         }
     }
     close QMLIST;
+
+    if ( time() - $last_log > $config->log_interval ) {
+        %vms_not_here = ();
+        $last_log = time();
+    }
 
     foreach my $file (@vm_confs) {
         (my $vmid = $file) =~ s/\.conf$//;
@@ -184,8 +197,10 @@ sub discover_new_vms {
             }
             delete $vms_not_here{$vmid};
         } else {
-            syslog('info', "[$name{$vmid}] VM $vmid: $status{$vmid}, not monitoring");
-            delete $vms_not_here{$vmid};
+            unless ( $vms_not_here{$vmid} ) {
+                syslog('notice', "[$name{$vmid}] VM $vmid: $status{$vmid}, not monitoring");
+                $vms_not_here{$vmid} = 1;
+            }
         }
     }
 }
