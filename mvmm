@@ -239,7 +239,6 @@ sub monitor_vm {
     my $restart_after = $config->get("restart_after");
 
     $last_log = time();
-    my $last_after_restart = 0;
     my $booting = 1;
 
     if (!$enabled) {
@@ -266,19 +265,20 @@ sub monitor_vm {
                 my @lt = localtime($now);
                 my $today_restart = timelocal(0, $min, $hr, @lt[3,4,5]);
                 if ($now >= $today_restart && $last_scheduled_restart < $today_restart) {
-                    syslog('info', "[$name] Scheduled restart at $restart_at triggered.");
+                    syslog('notice', "[$name] Scheduled restart at $restart_at triggered.");
                     reboot_vm($vmid, $name, $wait_interval);
                     $last_scheduled_restart = $restarted = $now;
+                    $booting = 1;
                 }
             }
         }
 
         if ($restart_after) {
-            my $interval = $restart_after * 3600;
-            if (($now - $restarted) >= $interval && $last_after_restart < $interval) {
-                syslog('info', "[$name] Restarting after $restart_after hours.");
+            if (($now - $restarted) >= $restart_after) {
+                syslog('notice', "[$name] Restarting - $restart_after seconds have elapsed.");
                 reboot_vm($vmid, $name, $wait_interval);
                 $restarted = $now;
+                $booting = 1;
             }
         }
 
@@ -321,10 +321,20 @@ sub monitor_vm {
         if (!$firsterror && (($now - $last_log) >= $log_interval)) {
             my $datetime = localtime($restarted);
             syslog('info', "[$name] Monitoring - online since: ${datetime}");
+
+            if ($restart_at) {
+                syslog('info', "[$name] Restarting at ${restart_at}");
+            }
+
+            if ($restart_after) {
+                my $at = localtime($restarted + $restart_after);
+                syslog('info', "[$name] Restarting at ${at}");
+            }
+
             $last_log = $now;
         }
 
-        usleep($check_interval * 1_000_000);
+        sleep($check_interval);
     }
 }
 
