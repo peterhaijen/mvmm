@@ -11,6 +11,8 @@ use Sys::Syslog qw(:standard :macros);
 use POSIX qw(floor);
 use feature 'state';
 use File::Pid;
+use IO::Socket::UNIX;
+use JSON;
 #use Data::Dump;
 
 my %children;
@@ -252,35 +254,6 @@ sub monitor_vm {
 
     while (1) {
         my $now = time();
-        my $vm_status = `qm status $vmid 2>&1`;
-
-        if ($vm_status =~ /does not exist|unable to find/ || $vm_status !~ /running/) {
-            syslog('info', "[$name] VMID $vmid is no longer available or not running. Exiting monitor.");
-            return;
-        }
-
-        if ($restart_at) {
-            my ($hr, $min) = $restart_at =~ /^(\d\d):(\d\d)$/;
-            if (defined $hr && defined $min) {
-                my @lt = localtime($now);
-                my $today_restart = timelocal(0, $min, $hr, @lt[3,4,5]);
-                if ($now >= $today_restart && $last_scheduled_restart < $today_restart) {
-                    syslog('notice', "[$name] Scheduled restart at $restart_at triggered.");
-                    reboot_vm($vmid, $name, $wait_interval);
-                    $last_scheduled_restart = $restarted = $now;
-                    $booting = 1;
-                }
-            }
-        }
-
-        if ($restart_after) {
-            if (($now - $restarted) >= $restart_after) {
-                syslog('notice', "[$name] Restarting - $restart_after seconds have elapsed.");
-                reboot_vm($vmid, $name, $wait_interval);
-                $restarted = $now;
-                $booting = 1;
-            }
-        }
 
         if (is_healthy($ip, \@portsall, \@portsany)) {
             if ( $firsterror ) {
@@ -288,7 +261,42 @@ sub monitor_vm {
                 syslog('info', "[$name] Online after ${elapsed}s.");
             }
             $firsterror = $booting = undef;
+
+            if ($restart_at) {
+                my ($hr, $min) = $restart_at =~ /^(\d\d):(\d\d)$/;
+                if (defined $hr && defined $min) {
+                    my @lt = localtime($now);
+                    my $today_restart = timelocal(0, $min, $hr, @lt[3,4,5]);
+                    if ($now >= $today_restart && $last_scheduled_restart < $today_restart) {
+                        syslog('notice', "[$name] Scheduled restart at $restart_at triggered.");
+                        reboot_vm($vmid, $name, $wait_interval);
+                        $last_scheduled_restart = $restarted = $now;
+                        $booting = 1;
+                    }
+                }
+            }
+
+            if ($restart_after) {
+                if (($now - $restarted) >= $restart_after) {
+                    syslog('notice', "[$name] Restarting - $restart_after seconds have elapsed.");
+                    reboot_vm($vmid, $name, $wait_interval);
+                    $restarted = $now;
+                    $booting = 1;
+                }
+            }
+
         } else {
+
+            # VM is not healthy anymore. Perhaps it's not running anymore?
+            my $vm_status = get_status($vmid);
+
+            if ($vm_status !~ /running/) {
+                syslog('info', "[$name] VMID $vmid is no longer available or not running. Exiting monitor.");
+                return;
+            }
+
+            # Status is 'running' but it's not healthy
+
             $firsterror //= $now;
             my $after_seconds;
             my $msg;
@@ -350,9 +358,9 @@ sub disabled_loop {
 
         sleep(15);
 
-        my $vm_status = `qm status $vmid 2>&1`;
+        my $vm_status = get_status($vmid);
 
-        if ($vm_status =~ /does not exist|unable to find/ || $vm_status !~ /running/) {
+        if ($vm_status !~ /running/) {
             syslog('info', "[$name] VMID $vmid is no longer available or not running. Exiting monitor.");
             return;
         }
@@ -373,6 +381,45 @@ sub is_healthy {
     return 1;
 }
 
+sub get_status {
+    my ($vmid) = @_;
+    #my $status = `qm status $vmid 2>&1`; chop($status);
+
+    my $socket_path = "/run/qemu-server/$vmid.qmp";
+
+    my $status = "stopped";
+
+    if ( my $sock = IO::Socket::UNIX->new(
+                            Type => SOCK_STREAM(),
+                            Peer => $socket_path) ) {
+
+        # Read the QMP greeting
+        my $greeting = <$sock>;
+        # print "QMP Greeting: $greeting\n";
+
+        # Enable capabilities
+        print $sock encode_json({ execute => 'qmp_capabilities' }) . "\n";
+        my $response = <$sock>;
+        #print "Capabilities Response: $response\n";
+
+        # Query VM status
+        print $sock encode_json({ execute => 'query-status' }) . "\n";
+        my $json_response = <$sock>;
+
+        $sock->close();
+
+        # Decode the JSON response
+        my $decoded = decode_json($json_response);
+
+        # Access the 'status' field
+        $status = $decoded->{return}->{status};
+    }
+
+    # syslog('debug', "VM $vmid: status = $status");
+
+    return $status;
+}
+
 sub port_open {
     my ($ip, $port) = @_;
     my $sock = IO::Socket::INET->new(PeerAddr => $ip, PeerPort => $port, Timeout => 1);
@@ -385,7 +432,7 @@ sub reboot_vm {
 
     my $elapsed = 0;
     while ($elapsed < $wait) {
-        my $status = `qm status $vmid`;
+        my $status = get_status($vmid);
         if ($status =~ /stopped/) {
             last;
         }
@@ -393,12 +440,12 @@ sub reboot_vm {
         $elapsed++;
     }
 
-    my $final_status = `qm status $vmid`;
+    my $final_status = get_status($vmid);
     unless ($final_status =~ /stopped/) {
         system("qm stop $vmid");
         my $elapsed_stop = 0;
         while ($elapsed_stop < $wait) {
-            my $check_status = `qm status $vmid`;
+            my $check_status = get_status($vmid);
             last if ($check_status =~ /stopped/);
             sleep(1);
             $elapsed_stop++;
