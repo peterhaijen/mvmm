@@ -87,9 +87,19 @@ syslog('info', "mvmm supervisor started.");
 
 $SIG{TERM} = \&graceful_exit;
 $SIG{INT}  = \&graceful_exit;
+
+my $last_log;
+
 $SIG{USR1} = sub { 
     if ( $pid == $$ ) {
+        # Parent
+        syslog('info', "Supervisor - maintenance mode: $maintenance_mode");
+        my $count = scalar keys %children;
+        syslog('info', "Supervisor - monitoring ${count} VMs");
         foreach my $pid (keys %children) { kill 'USR1', $pid; }
+    } else {
+        # A monitoring child
+        $last_log = 0;
     }
 };
 
@@ -213,7 +223,7 @@ sub monitor_vm {
     my $restart_at = $config->get("restart_at");
     my $restart_after = $config->get("restart_after");
 
-    my $last_log = time();
+    $last_log = time();
     my $last_after_restart = 0;
     my $booting = 1;
 
@@ -295,7 +305,7 @@ sub monitor_vm {
 
         if (!$firsterror && (($now - $last_log) >= $log_interval)) {
             my $datetime = localtime($restarted);
-            syslog('info', "[$name] Running since: ${datetime}");
+            syslog('info', "[$name] Monitoring - online since: ${datetime}");
             $last_log = $now;
         }
 
