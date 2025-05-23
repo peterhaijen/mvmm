@@ -213,6 +213,7 @@ sub start_monitor_for_vmid {
     if (!defined $pid) {
         die "Cannot fork: $!";
     } elsif ($pid == 0) {
+        $0 = "mvmm monitor for VM $vmid [$name{$vmid}]";
         monitor_vm($vmid);
         exit(0);
     } else {
