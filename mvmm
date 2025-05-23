@@ -13,6 +13,7 @@ use feature 'state';
 use File::Pid;
 use IO::Socket::UNIX;
 use JSON;
+
 #use Data::Dump;
 
 my %children;
@@ -191,7 +192,9 @@ sub discover_new_vms {
                 $vms_not_here{$vmid} = 1;
             }
         } elsif ($status{$vmid} =~ /running/) {
-            syslog('info', "[$name{$vmid}] VM $vmid is running, starting monitor.");
+            my $uptime = get_uptime($vmid);
+            my $msg = sprintf "[%s] VM %d is running, uptime %s, starting monitor.", $name{$vmid}, $vmid, format_duration($uptime);
+            syslog('info', $msg);
             if ( $config->nofork ) {
                 monitor_vm($vmid); # For testing without a child process
             } else {
@@ -255,11 +258,13 @@ sub monitor_vm {
 
     while (1) {
         my $now = time();
+        my $uptime = get_uptime($vmid);
 
         if (is_healthy($ip, \@portsall, \@portsany)) {
             if ( $firsterror ) {
                 my $elapsed = floor($now-$firsterror+0.5);
-                syslog('info', "[$name] Online after ${elapsed}s.");
+                my $msg = sprintf "[%s] Online after %s, uptime %s.", $name, format_duration($elapsed), format_duration($uptime);
+                syslog('info', $msg);
             }
             $firsterror = $booting = undef;
 
@@ -278,8 +283,9 @@ sub monitor_vm {
             }
 
             if ($restart_after) {
-                if (($now - $restarted) >= $restart_after) {
-                    syslog('notice', "[$name] Restarting - $restart_after seconds have elapsed.");
+                if ($uptime >= $restart_after) {
+                    my $msg = sprintf "[%s] Restarting - uptime %s", $name, $uptime;
+                    syslog('notice', $msg);
                     reboot_vm($vmid, $name, $wait_interval);
                     $restarted = $now;
                     $booting = 1;
@@ -307,10 +313,10 @@ sub monitor_vm {
                 $msg = "[$name] Failed health check; maintenance mode active, no reboot will occur.";
             } elsif ( $booting ) {
                 $after_seconds = $boot_time;
-                $msg = "[$name] Failed health check; reboot at " . localtime($firsterror + $after_seconds);
+                $msg = sprintf "[%s] Failed health check; reboot in %s", $name, format_duration($after_seconds);
             } else {
                 $after_seconds = $fail_threshold;
-                $msg = "[$name] Failed health check; reboot at " . localtime($firsterror + $after_seconds);
+                $msg = sprintf "[%s] Failed health check; reboot in %s", $name, format_duration($after_seconds);
             }
 
             if ( ($now - $last_log) >= $log_interval || $firsterror == $now ) {
@@ -319,7 +325,8 @@ sub monitor_vm {
             }
 
             if ($after_seconds && ($now - $firsterror) >= $after_seconds) {
-                syslog('err', "[$name] VM unhealthy for $after_seconds seconds, rebooting now!");
+                my $msg = sprintf "[%s] VM unhealthy for %s, uptime %s - rebooting now!", $name, format_duration($after_seconds), format_duration($uptime);
+                syslog('err', $msg);
                 reboot_vm($vmid, $name, $wait_interval);
                 $restarted = $now;
                 $firsterror = undef;
@@ -328,15 +335,15 @@ sub monitor_vm {
         }
 
         if (!$firsterror && (($now - $last_log) >= $log_interval)) {
-            my $datetime = localtime($restarted);
-            syslog('info', "[$name] Monitoring - online since: ${datetime}");
+            my $msg = sprintf "[%s] Monitoring - online for %s", $name, $uptime;
+            syslog('info', $msg);
 
             if ($restart_at) {
                 syslog('info', "[$name] Restarting at ${restart_at}");
             }
 
             if ($restart_after) {
-                my $at = localtime($restarted + $restart_after);
+                my $at = localtime(time() + $restart_after - $uptime);
                 syslog('info', "[$name] Restarting at ${at}");
             }
 
@@ -380,6 +387,29 @@ sub is_healthy {
         return 0;
     }
     return 1;
+}
+
+sub get_uptime {
+    my ($vmid) = @_;
+
+    my $pid = do {
+        if ( open my $fh, '<', "/run/qemu-server/$vmid.pid" ) {
+            my $x = <$fh>;
+            chomp $x if defined $x;
+            $x;
+        }
+        # if open fails or file is empty, do-block returns undef
+    };
+
+    my $uptime = 0;
+
+    if ($pid) {
+        ($uptime) = `ps -p $pid -o etimes=` =~ /^\s*(\d+)/;
+    }
+
+    # syslog('debug', "VM $vmid: uptime = $uptime");
+
+    return $uptime;
 }
 
 sub get_status {
@@ -454,6 +484,53 @@ sub reboot_vm {
     }
 
     system("qm start $vmid");
+}
+
+sub format_duration {
+    my ($secs) = @_;
+    return '0s' if $secs <= 0;
+
+    # < 1 minute: show seconds
+    return "${secs}s" if $secs < 60;
+
+    # < 1 hour: minutes + optional seconds
+    if ($secs < 3600) {
+        my $m = int($secs / 60);
+        my $s = $secs % 60;
+        return $s ? "${m}m${s}s" : "${m}m";
+    }
+
+    # < 1 day: hours + optional minutes (round up leftover seconds to next minute)
+    if ($secs < 86400) {
+        my $h   = int($secs / 3600);
+        my $rem = $secs % 3600;
+        my $m   = int($rem / 60 + ($rem % 60 ? 1 : 0));
+        if ($m >= 60) { $h++; $m = 0 }
+        return $m ? "${h}h${m}m" : "${h}h";
+    }
+
+    # ≥ 1 day: days + optional hours + optional minutes
+    my $d    = int($secs / 86400);
+    my $rem1 = $secs % 86400;
+    my $h    = int($rem1 / 3600);
+    my $rem2 = $rem1 % 3600;
+    my $m    = int($rem2 / 60 + ($rem2 % 60 ? 1 : 0));
+
+    # if rounding minutes gives 60, roll into an extra hour
+    if ($m >= 60) {
+        $h++;
+        $m = 0;
+    }
+    # if hours reach 24, roll into an extra day
+    if ($h >= 24) {
+        $d++;
+        $h = 0;
+    }
+
+    my $str = "${d}d";
+    $str .= "${h}h" if $h;
+    $str .= "${m}m" if $m;
+    return $str;
 }
 
 supervise_children();
