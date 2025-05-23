@@ -16,6 +16,8 @@ use JSON;
 
 #use Data::Dump;
 
+our $version = '1.2~dev202505231628';  # version-marker: replace-me
+
 my %children;
 my $maintenance_mode = 0;
 my %name;
@@ -40,7 +42,7 @@ $config->define("restart_after",         {                     ARGCOUNT => AppCo
 $config->define("nofork|n!",             { DEFAULT => 0 });
 $config->define("usr1|1!",               { DEFAULT => 0 });
 $config->define("usr2|2!",               { DEFAULT => 0 });
-$config->define("pidfile!",              { DEFAULT => '/tmp/mvmm.pid' });
+$config->define("pidfile!",              { DEFAULT => '/run/mvmm.pid' });
 
 $config->file($global_config_file) if -f $global_config_file;
 $config->args() or die "Invalid arguments";
@@ -86,7 +88,7 @@ END {
     }
 }
 
-syslog('info', "mvmm supervisor started.");
+syslog('info', "mvmm supervisor $version started.");
 
 $SIG{TERM} = \&graceful_exit;
 $SIG{INT}  = \&graceful_exit;

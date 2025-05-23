@@ -15,8 +15,13 @@ VERSION := $(VERSION)~dev$(shell date +%Y%m%d%H%M)
 
 DEB=$(PACKAGE)_$(VERSION)_$(ARCH).deb
 BUILD_DIR=$(PACKAGE)_$(VERSION)
+SCRIPT := mvmm
 
-all: deb
+all: update-version deb
+
+update-version:
+	@echo "Updating $(SCRIPT) to version $(VERSION)"
+	@sed -i "s|^our .version = '.*'; *# version-marker: replace-me$$|our \$$version = '$(VERSION)';  # version-marker: replace-me|g" $(SCRIPT)
 
 deb:
 	@echo "$(VERSION)" > $(BUILD_VERSION_FILE)
