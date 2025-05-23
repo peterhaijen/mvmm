@@ -9,7 +9,7 @@ Designed for **reliability**, **mvmm** uses isolated processes per VM and clean 
 
 ## ✨ Features
 
-- Monitor any number of VMs from a simple config file
+- Monitor any number of VMs from simple config files
 - Supports VM migration from one Proxmox node to another
 - Per-VM health check via TCP port responsiveness
 - Automatic reboot after configurable failure thresholds
@@ -48,7 +48,8 @@ cd mvmm
 ```
 ### Use the official repository
 
-A recent version of mvmm will be available at [the official repository](https://repo.qb21.nl/).
+A Debian package with the most recent version will be available at [the official repository](https://repo.qb21.nl/).
+Just add the repository, and apt install mvmm.
 
 ---
 
@@ -63,25 +64,21 @@ There is a global configuration file `/etc/pve/mvmm/mvmm.conf`, with settings th
 | Field             | Meaning |
 |:------------------|:--------|
 | `ip`               | IP address of VM to monitor |
-| `name`             | Name of the VM to monitor, used for logging |
 | `portsall`         | Space-separated list of ports; all must be responsive |
 | `portsany`         | Space-separated list of ports; at least one must be responsive |
 | `check_interval`   | Seconds between health checks when healthy |
-| `fail_interval`    | Seconds between checks when a failure is detected |
-| `fail_threshold`   | **Seconds** of continuous failure allowed before reboot |
-| `wait_interval`    | Seconds to wait during shutdown/startup steps |
+| `fail_threshold`   | Seconds of continuous failure allowed during normal operation |
+| `boot_time`        | Seconds of continuous failure allowed after reboot or after mvmm startup |
+| `wait_interval`    | Seconds to wait during shutdown/hard stop steps |
 | `log_interval`     | Seconds between "still running" logs during healthy operation |
-| `recovery_time`    | Seconds after a reboot necesary for the VM to be operational again |
 
 ✅ All time values are **in seconds**.
 
-✅ **Fail threshold** is a time duration, **not a number of failures**.
-
 ```
 $ cat /etc/pve/mvmm/mvmm.conf 
-check_interval=2
-fail_interval=15
+check_interval=60
 fail_threshold=30
+boot_time=60
 wait_interval=15
 log_interval=900
 ```
@@ -94,7 +91,6 @@ Typically, this will contain the IP address and port numbers to monitor.
 
 ```
 $ cat /etc/pve/mvmm/100.conf
-name=nginx
 ip=192.168.1.25
 portsall=80
 ```
@@ -136,8 +132,8 @@ The `mvmm` parent process listens for Unix signals to perform dynamic actions:
 Examples:
 
 ```bash
-kill -USR1 $(pidof mvmm)
-kill -USR2 $(pidof mvmm)
+mvmm -1 # Send SIGUSR1 to active mvmm daemon
+mvmm -2 # Send SIGUSR2 to active mvmm daemon
 kill -TERM $(pidof mvmm)
 ```
 
@@ -174,7 +170,7 @@ sudo dpkg -i mvmm_*.deb
 ```
 
 This will:
-- Install the `mvmm` per script to `/usr/local/bin/mvmm`
+- Install the `mvmm` perl script to `/usr/local/bin/mvmm`
 - Install a default config `/etc/pve/mvmm/mvmm.conf`
 - Install systemd service `/etc/systemd/system/mvmm.service`
 - Automatically enable and start the `mvmm` systemd service.

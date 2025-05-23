@@ -11,7 +11,7 @@ BUILD_VERSION_FILE := .build-version
 # The version we are working on
 VERSION := 1.2
 # Uncomment this while the version is in development
-VERSION := $(VERSION)~dev$(shell date +%Y%m%d%H%M)
+#VERSION := $(VERSION)~dev$(shell date +%Y%m%d%H%M)
 
 DEB=$(PACKAGE)_$(VERSION)_$(ARCH).deb
 BUILD_DIR=$(PACKAGE)_$(VERSION)

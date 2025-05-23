@@ -16,7 +16,7 @@ use JSON;
 
 #use Data::Dump;
 
-our $version = '1.2~dev202505231628';  # version-marker: replace-me
+our $version = '1.2';  # version-marker: replace-me
 
 my %children;
 my $maintenance_mode = 0;
@@ -27,7 +27,6 @@ my $global_config_file = "$config_dir/mvmm.conf";
 my $config = AppConfig->new({ CASE => 1, ERROR => sub { printf STDERR "Ignoring invalid argument: " . shift . "\n" } });
 $config->define("disabled_log_interval", { DEFAULT => 25200,   ARGCOUNT => AppConfig::ARGCOUNT_ONE });
 $config->define("check_interval",        { DEFAULT =>    60,   ARGCOUNT => AppConfig::ARGCOUNT_ONE });
-$config->define("fail_interval",         { DEFAULT =>    15,   ARGCOUNT => AppConfig::ARGCOUNT_ONE });
 $config->define("fail_threshold",        { DEFAULT =>    30,   ARGCOUNT => AppConfig::ARGCOUNT_ONE });
 $config->define("wait_interval",         { DEFAULT =>    15,   ARGCOUNT => AppConfig::ARGCOUNT_ONE });
 $config->define("boot_time",             { DEFAULT =>    60,   ARGCOUNT => AppConfig::ARGCOUNT_ONE });
@@ -237,7 +236,6 @@ sub monitor_vm {
     my @portsany = split(' ', $config->get("portsany") // '');
     my $enabled = lc($config->get("enabled") // 'true') eq 'true';
     my $check_interval = $config->get("check_interval");
-    my $fail_interval = $config->get("fail_interval");
     my $fail_threshold = $config->get("fail_threshold");
     my $wait_interval = $config->get("wait_interval");
     my $log_interval = $config->get("log_interval");
