@@ -16,7 +16,7 @@ use JSON;
 
 #use Data::Dump;
 
-our $version = '1.2';  # version-marker: replace-me
+our $version = '1.3~dev202505231925';  # version-marker: replace-me
 
 my %children;
 my $maintenance_mode = 0;
@@ -284,7 +284,7 @@ sub monitor_vm {
 
             if ($restart_after) {
                 if ($uptime >= $restart_after) {
-                    my $msg = sprintf "[%s] Restarting - uptime %s", $name, $uptime;
+                    my $msg = sprintf "[%s] Restarting - uptime %s", $name, format_duration($uptime);
                     syslog('notice', $msg);
                     reboot_vm($vmid, $name, $wait_interval);
                     $restarted = $now;
@@ -335,7 +335,7 @@ sub monitor_vm {
         }
 
         if (!$firsterror && (($now - $last_log) >= $log_interval)) {
-            my $msg = sprintf "[%s] Monitoring - online for %s", $name, $uptime;
+            my $msg = sprintf "[%s] Monitoring - online for %s", $name, format_duration($uptime);
             syslog('info', $msg);
 
             if ($restart_at) {
