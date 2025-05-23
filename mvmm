@@ -87,7 +87,7 @@ END {
     }
 }
 
-syslog('info', "mvmm supervisor $version started.");
+syslog('info', "mvmm supervisor v${version} started.");
 
 $SIG{TERM} = \&graceful_exit;
 $SIG{INT}  = \&graceful_exit;
